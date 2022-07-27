@@ -1,4 +1,4 @@
-cabal-version: 1.12
+cabal-version: 1.22
 
 -- This file has been generated from package.yaml by hpack version 0.34.4.
 --
@@ -27,8 +27,12 @@ library
   exposed-modules:
       Buttplug.ButtplugM
       Buttplug.Message
+      Buttplug.WebSockets
   other-modules:
       Paths_buttplug_hs
+  reexported-modules:
+      Buttplug.Core.Device as Buttplug.Device
+    , Buttplug.Core.Handle as Buttplug.Handle
   hs-source-dirs:
       src
   build-depends:

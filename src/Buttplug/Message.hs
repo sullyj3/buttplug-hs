@@ -6,18 +6,19 @@ module Buttplug.Message
   ( Message (..),
     withMsgId,
     withoutMsgId,
-    module Buttplug.Core.Message
+    module Buttplug.Core.Message,
+    module Buttplug.Core.Device
   )
 where
 
-import Buttplug.Core.Device (Device)
+import Buttplug.Core.Device (Device(..))
 import Buttplug.Core.Device qualified as Dev
 import Buttplug.Core.Message
-  ( ErrorCode,
-    LinearActuate,
-    RawData,
-    Rotate,
-    Vibrate,
+  ( ErrorCode(..),
+    LinearActuate(..),
+    RawData(..),
+    Rotate(..),
+    Vibrate(..),
     clientMessageVersion,
   )
 import Buttplug.Core.Message qualified as CoreMsg

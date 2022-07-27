@@ -33,8 +33,13 @@ dependencies:
 - transformers-base
 - unliftio-core
 
+
 library:
   source-dirs: src
+
+  reexported-modules:
+  - Buttplug.Core.Device as Buttplug.Device
+  - Buttplug.Core.Handle as Buttplug.Handle
 
 executables:
   buttplug-exe:
