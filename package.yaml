@@ -45,7 +45,7 @@ executables:
     - -rtsopts
     - -with-rtsopts=-N
     dependencies:
-    - buttplug
+    - buttplug-hs
 
 tests:
   buttplug-test:
@@ -56,4 +56,4 @@ tests:
     - -rtsopts
     - -with-rtsopts=-N
     dependencies:
-    - buttplug
+    - buttplug-hs
