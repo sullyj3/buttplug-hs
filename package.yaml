@@ -1,10 +1,10 @@
-name:                buttplug
+name:                buttplug-hs
 version:             0.1.0.0
-github:              "githubuser/buttplug"
+github:              "sullyj3/buttplug-hs"
 license:             BSD3
-author:              "Author name here"
-maintainer:          "example@example.com"
-copyright:           "2022 Author name here"
+author:              "James Sully"
+maintainer:          "sullyj3@gmail.com"
+copyright:           "2022 James Sully"
 
 extra-source-files:
 - README.md
