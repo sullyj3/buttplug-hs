@@ -9,10 +9,11 @@
 
 module Buttplug.ButtplugM
   ( ButtplugM,
+    requestDeviceList,
     runButtplug,
     sendMessages,
     sendMessage,
-    receiveMessages
+    startScanning,
   )
 where
 
@@ -24,7 +25,8 @@ import Buttplug.Core.Message qualified as CoreMsg
 import Buttplug.Message
 import Control.Concurrent.STM
 import Control.Concurrent.STM.TVar (newTVarIO)
-import Control.Exception (throwIO)
+import Control.Exception (Exception, throwIO)
+import Control.Monad (forever)
 import Control.Monad.Base
 import Control.Monad.Catch (MonadThrow)
 import Control.Monad.IO.Class
@@ -32,7 +34,12 @@ import Control.Monad.IO.Unlift
 import Control.Monad.Reader.Class
 import Control.Monad.Trans.Control
 import Control.Monad.Trans.Reader (ReaderT, runReaderT)
+import Data.Foldable
 import Data.Text (Text)
+import StmContainers.Map qualified as STMMap
+import Control.Concurrent.MVar
+import Ki.Unlifted
+import Control.Concurrent (threadDelay)
 
 -- TODO
 -- We should maintain a list of available devices, and allow users to request them directly
@@ -47,8 +54,73 @@ data BPEnv = BPEnv
   { clientName :: Text,
     handle :: Handle,
     serverInfo :: ServerInfo,
-    msgIdCounter :: TVar Word
+    msgIdCounter :: TVar Word,
+    devices :: TMVar [Device],
+    pendingResponses :: STMMap.Map Word (Message -> ButtplugM ())
   }
+
+-- vibrate :: Device -> [Vibrate] -> ButtplugM (Async Message)
+-- vibrate (Device {deviceIndex}) speeds = do
+--   sendMessage (MsgVibrateCmd deviceIndex speeds)
+--   undefined
+
+-- expect response
+
+newtype UnexpectedResponse = UnexpectedResponse Message
+  deriving (Show)
+
+instance Exception UnexpectedResponse
+
+-- We're expecting a response from the server with a particular message id
+-- f encodes our expectations about the response, returning Nothing if it's unexpected
+-- when we get the response, apply f to it, returning the result if it 
+-- succeeds, or UnexpectedResponse if it fails
+expectResponse :: (Message -> Maybe b) -> Word -> ButtplugM (Either UnexpectedResponse b)
+expectResponse f msgId = do
+  -- `pending` maps pending response message ids to callbacks that should be performed 
+  -- on those responses
+  pending <- asks pendingResponses
+  output <- liftIO newEmptyMVar
+  let writeOutput msg = liftIO $ putMVar output result
+        where
+          result = case f msg of
+            Just x -> Right x
+            Nothing -> Left $ UnexpectedResponse msg
+  liftIO $ do
+    atomically $ STMMap.insert writeOutput msgId pending
+    takeMVar output
+
+sendMessageExpectResponse ::
+  (Message -> Maybe a) -> Message -> ButtplugM (Either UnexpectedResponse a)
+sendMessageExpectResponse expect msg = do
+  msgId <- nextMsgId
+  let coreMsg = withMsgId msgId msg
+  sendCoreMessage coreMsg
+  expectResponse expect msgId
+
+sendMessageExpectOk :: Message -> ButtplugM (Either UnexpectedResponse Message)
+sendMessageExpectOk = sendMessageExpectResponse $ \msg -> case msg of
+  MsgOk -> Just msg
+  _ -> Nothing
+
+requestDeviceList :: ButtplugM (Either UnexpectedResponse [Device])
+requestDeviceList = sendMessageExpectResponse
+  (\case MsgDeviceList devList -> Just devList
+         _ -> Nothing)
+  MsgRequestDeviceList
+
+startScanning :: ButtplugM (Either UnexpectedResponse Message)
+startScanning = sendMessageExpectOk MsgStartScanning
+
+
+-- Post-increment
+nextMsgId = do
+  msgIdVar <- asks msgIdCounter
+  liftIO $ atomically $ stateTVar msgIdVar $ \n -> (n, n + 1)
+
+isOk = \case
+  MsgOk -> True
+  _ -> False
 
 newtype ButtplugM a = ButtplugM {runButtplugM :: ReaderT BPEnv IO a}
   deriving newtype
@@ -93,14 +165,27 @@ runButtplug :: Text -> Handle -> ButtplugM a -> IO a
 runButtplug clientName handle bp = do
   serverInfo <- handshake clientName handle
   msgIdCounter <- newTVarIO 2
-  let env = BPEnv clientName handle serverInfo msgIdCounter
-  flip runReaderT env . runButtplugM $ bp
+  devices <- newEmptyTMVarIO
+  pendingResponses <- STMMap.newIO
+  let env =
+        BPEnv
+          clientName
+          handle
+          serverInfo
+          msgIdCounter
+          devices
+          pendingResponses
+  flip runReaderT env . runButtplugM $
+    scoped $ \scope -> do
+      _ <- fork scope $ forever handleIncomingMessages
+      bp
+      
 
-sendCoreMessages :: [CoreMsg.Message] -> ButtplugM ()
-sendCoreMessages msgs = withHandle $ \h -> Handle.sendMessages h msgs
-
-sendCoreMessage :: CoreMsg.Message -> ButtplugM ()
-sendCoreMessage msg = withHandle $ \h -> Handle.sendMessage h msg
+-- `retry` until it exists
+getDevices :: ButtplugM [Device]
+getDevices = do
+  devicesVar <- asks devices
+  liftIO . atomically $ readTMVar devicesVar
 
 sendMessages :: [Message] -> ButtplugM ()
 sendMessages msgs = do
@@ -111,18 +196,50 @@ sendMessages msgs = do
         \n -> (n, n + fromIntegral (length msgs))
   let coreMsgs = zipWith withMsgId [msgId ..] msgs
   sendCoreMessages coreMsgs
+  where
+    sendCoreMessages :: [CoreMsg.Message] -> ButtplugM ()
+    sendCoreMessages msgs = withHandle $ \h -> Handle.sendMessages h msgs
 
 sendMessage :: Message -> ButtplugM ()
 sendMessage msg = do
-  msgIdVar <- asks msgIdCounter
-  msgId <- liftIO $ atomically $ stateTVar msgIdVar $ \n -> (n, n + 1)
+  msgId <- nextMsgId
   sendCoreMessage $ withMsgId msgId msg
 
-receiveCoreMessages :: ButtplugM [CoreMsg.Message]
-receiveCoreMessages = withHandle Handle.receiveMessages
+sendCoreMessage :: CoreMsg.Message -> ButtplugM ()
+sendCoreMessage msg = do
+  withHandle $ \h -> Handle.sendMessage h msg
 
-receiveMessages :: ButtplugM [Message]
-receiveMessages = map withoutMsgId <$> receiveCoreMessages
+handleIncomingMessages :: ButtplugM ()
+handleIncomingMessages = do
+  msgs <- receiveCoreMessages
+  traverse_ handleIncomingMessage msgs
+  where
+    receiveCoreMessages :: ButtplugM [CoreMsg.Message]
+    receiveCoreMessages = withHandle Handle.receiveMessages
 
+    handleIncomingMessage :: CoreMsg.Message -> ButtplugM ()
+    handleIncomingMessage msg = do
+      handlePendingResponse msg
+      case withoutMsgId msg of
+        MsgDeviceList devList -> updateDevices devList
+        _ -> pure ()
+
+    handlePendingResponse :: CoreMsg.Message -> ButtplugM ()
+    handlePendingResponse msg = do
+      pending <- asks pendingResponses
+      mCallback <- liftIO . atomically $ STMMap.lookup (CoreMsg.msgId msg) pending
+      case mCallback of
+        Just callback -> callback (withoutMsgId msg)
+        Nothing -> pure ()
+
+    updateDevices :: [Device] -> ButtplugM ()
+    updateDevices devList = do
+      devicesVar <- asks devices
+      _ <- liftIO . atomically $ swapTMVar devicesVar devList
+      pure ()
+
+-- Continuation must return to ensure we put the handle back for other threads
 withHandle :: (Handle -> IO a) -> ButtplugM a
-withHandle k = liftIO . k =<< asks handle
+withHandle k = do
+  hndl <- asks handle
+  liftIO $ k hndl

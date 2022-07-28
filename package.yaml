@@ -25,9 +25,11 @@ dependencies:
 - buttplug-hs-core
 - containers
 - exceptions
+- ki-unlifted
 - monad-control
 - mtl
 - stm
+- stm-containers
 - text
 - transformers
 - transformers-base
