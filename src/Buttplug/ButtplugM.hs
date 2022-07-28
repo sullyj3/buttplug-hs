@@ -1,19 +1,30 @@
 {-# LANGUAGE DerivingStrategies #-}
-{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE ImportQualifiedPost #-}
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE TypeFamilies #-}
 
-module Buttplug.ButtplugM where
+module Buttplug.ButtplugM
+  ( ButtplugM,
+    runButtplug,
+    sendMessages,
+    sendMessage,
+    receiveMessages
+  )
+where
 
 -- start with a concrete monad, we'll figure out how to do a transformer later
 
-import Buttplug.Core.Handle (Handle)
+import Buttplug.Core.Handle (ButtplugException (OtherConnectorError), Handle)
 import Buttplug.Core.Handle qualified as Handle
 import Buttplug.Core.Message qualified as CoreMsg
+import Buttplug.Message
 import Control.Concurrent.STM
 import Control.Concurrent.STM.TVar (newTVarIO)
+import Control.Exception (throwIO)
 import Control.Monad.Base
 import Control.Monad.Catch (MonadThrow)
 import Control.Monad.IO.Class
@@ -21,12 +32,25 @@ import Control.Monad.IO.Unlift
 import Control.Monad.Reader.Class
 import Control.Monad.Trans.Control
 import Control.Monad.Trans.Reader (ReaderT, runReaderT)
-import Buttplug.Message
+import Data.Text (Text)
 
 -- TODO
 -- We should maintain a list of available devices, and allow users to request them directly
 
-newtype ButtplugM a = ButtplugM {runButtplugM :: ReaderT (Handle, TVar Word) IO a}
+data ServerInfo = ServerInfo
+  { serverName :: Text,
+    serverMsgVersion :: Word,
+    serverMaxPingtime :: Word
+  }
+
+data BPEnv = BPEnv
+  { clientName :: Text,
+    handle :: Handle,
+    serverInfo :: ServerInfo,
+    msgIdCounter :: TVar Word
+  }
+
+newtype ButtplugM a = ButtplugM {runButtplugM :: ReaderT BPEnv IO a}
   deriving newtype
     ( Functor,
       Applicative,
@@ -34,7 +58,7 @@ newtype ButtplugM a = ButtplugM {runButtplugM :: ReaderT (Handle, TVar Word) IO 
       MonadFail,
       MonadThrow,
       MonadIO,
-      MonadReader (Handle, TVar Word),
+      MonadReader BPEnv,
       MonadUnliftIO,
       MonadBase IO
     )
@@ -44,10 +68,33 @@ instance MonadBaseControl IO ButtplugM where
   liftBaseWith f = ButtplugM $ liftBaseWith $ \q -> f (q . runButtplugM)
   restoreM = ButtplugM . restoreM
 
-runButtplug :: Handle -> ButtplugM a -> IO a
-runButtplug handle bp = do
-  msgIndexCounter <- newTVarIO 1
-  flip runReaderT (handle, msgIndexCounter) . runButtplugM $ bp
+handshake :: Text -> Handle -> IO ServerInfo
+handshake clientName handle = do
+  Handle.sendMessage handle $ CoreMsg.MsgRequestServerInfo 1 clientName clientMessageVersion
+  resp <- Handle.receiveMessages handle
+  case resp of
+    [ CoreMsg.MsgServerInfo
+        1
+        msgServerName
+        msgMessageVersion
+        msgMaxPingTime
+      ] ->
+        pure $
+          ServerInfo
+            { serverName = msgServerName,
+              serverMsgVersion = msgMessageVersion,
+              serverMaxPingtime = msgMaxPingTime
+            }
+    msgs ->
+      throwIO . OtherConnectorError $
+        "Server sent unexpected response to handshake: " <> show msgs
+
+runButtplug :: Text -> Handle -> ButtplugM a -> IO a
+runButtplug clientName handle bp = do
+  serverInfo <- handshake clientName handle
+  msgIdCounter <- newTVarIO 2
+  let env = BPEnv clientName handle serverInfo msgIdCounter
+  flip runReaderT env . runButtplugM $ bp
 
 sendCoreMessages :: [CoreMsg.Message] -> ButtplugM ()
 sendCoreMessages msgs = withHandle $ \h -> Handle.sendMessages h msgs
@@ -57,7 +104,7 @@ sendCoreMessage msg = withHandle $ \h -> Handle.sendMessage h msg
 
 sendMessages :: [Message] -> ButtplugM ()
 sendMessages msgs = do
-  msgIdVar <- getCurrMsgId
+  msgIdVar <- asks msgIdCounter
   msgId <- liftIO $
     atomically $
       stateTVar msgIdVar $
@@ -67,7 +114,7 @@ sendMessages msgs = do
 
 sendMessage :: Message -> ButtplugM ()
 sendMessage msg = do
-  msgIdVar <- getCurrMsgId
+  msgIdVar <- asks msgIdCounter
   msgId <- liftIO $ atomically $ stateTVar msgIdVar $ \n -> (n, n + 1)
   sendCoreMessage $ withMsgId msgId msg
 
@@ -77,18 +124,5 @@ receiveCoreMessages = withHandle Handle.receiveMessages
 receiveMessages :: ButtplugM [Message]
 receiveMessages = map withoutMsgId <$> receiveCoreMessages
 
-getHandle :: ButtplugM Handle
-getHandle = fst <$> ask
-
-getCurrMsgId :: ButtplugM (TVar Word)
-getCurrMsgId = snd <$> ask
-
 withHandle :: (Handle -> IO a) -> ButtplugM a
-withHandle k = getHandle >>= liftIO . k
-
-handshake :: ButtplugM Message
-handshake = do
-  sendMessage $ MsgRequestServerInfo "VibeMenu" clientMessageVersion
-  [servInfo@(MsgServerInfo {})] <- receiveMessages
-  pure servInfo
-
+withHandle k = liftIO . k =<< asks handle
