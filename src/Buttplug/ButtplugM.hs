@@ -46,9 +46,6 @@ import Ki.Unlifted
 import Control.Concurrent (threadDelay)
 import Data.Functor (($>))
 
--- TODO
--- We should maintain a list of available devices, and allow users to request them directly
-
 data ServerInfo = ServerInfo
   { serverName :: Text,
     serverMsgVersion :: Word,
@@ -87,10 +84,11 @@ instance Exception UnexpectedResponse
 -- succeeds, or UnexpectedResponse if it fails
 --
 -- TODO we should just throw the UnexpectedResponse here instead of returning Either
+-- TODO we should have a timeout for the response, and throw instead of blocking indefinitely
 expectResponse :: (Message -> Maybe b) -> Word -> ButtplugM (Either UnexpectedResponse b)
 expectResponse f msgId = do
   -- `pending` maps pending response message ids to callbacks that should be performed 
-  -- on those responses
+  -- on those responses. Calling the callback is performed by handleIncomingMessages
   pending <- asks pendingResponses
   output <- liftIO newEmptyMVar
   let writeOutput msg = liftIO $ putMVar output result
@@ -222,9 +220,8 @@ sendCoreMessage msg = do
   withHandle $ \h -> Handle.sendMessage h msg
 
 handleIncomingMessages :: ButtplugM ()
-handleIncomingMessages = do
-  msgs <- receiveCoreMessages
-  traverse_ handleIncomingMessage msgs
+handleIncomingMessages =
+  traverse_ handleIncomingMessage =<< receiveCoreMessages
   where
     receiveCoreMessages :: ButtplugM [CoreMsg.Message]
     receiveCoreMessages = withHandle Handle.receiveMessages
@@ -247,7 +244,6 @@ handleIncomingMessages = do
     updateDevices :: [Device] -> ButtplugM ()
     updateDevices devList = do
       devicesVar <- asks devices
-      -- TODO I think this blocks indefinitely if devicesVar is empty
       liftIO . atomically $ do
         isEmptyTMVar devicesVar >>= \case
           True -> putTMVar devicesVar devList
