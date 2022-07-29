@@ -4,16 +4,20 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE TypeFamilies #-}
 
 module Buttplug.ButtplugM
   ( ButtplugM,
     requestDeviceList,
+    getDevices,
     runButtplug,
     sendMessages,
     sendMessage,
     startScanning,
+    vibrateSingleMotor,
+    stopAllDevices,
+    UnexpectedResponse(..)
   )
 where
 
@@ -40,6 +44,7 @@ import StmContainers.Map qualified as STMMap
 import Control.Concurrent.MVar
 import Ki.Unlifted
 import Control.Concurrent (threadDelay)
+import Data.Functor (($>))
 
 -- TODO
 -- We should maintain a list of available devices, and allow users to request them directly
@@ -59,10 +64,15 @@ data BPEnv = BPEnv
     pendingResponses :: STMMap.Map Word (Message -> ButtplugM ())
   }
 
--- vibrate :: Device -> [Vibrate] -> ButtplugM (Async Message)
--- vibrate (Device {deviceIndex}) speeds = do
---   sendMessage (MsgVibrateCmd deviceIndex speeds)
---   undefined
+-- TODO throw exception if speed is not in correct range
+vibrate :: Device -> [Vibrate] -> ButtplugM (Either UnexpectedResponse Message)
+vibrate (Device {deviceIndex}) speeds = do
+  sendMessageExpectOk (MsgVibrateCmd deviceIndex speeds)
+
+-- todo implement better device API
+vibrateSingleMotor device speed = vibrate device [Vibrate 0 speed]
+
+stopAllDevices = sendMessageExpectOk MsgStopAllDevices
 
 -- expect response
 
@@ -75,6 +85,8 @@ instance Exception UnexpectedResponse
 -- f encodes our expectations about the response, returning Nothing if it's unexpected
 -- when we get the response, apply f to it, returning the result if it 
 -- succeeds, or UnexpectedResponse if it fails
+--
+-- TODO we should just throw the UnexpectedResponse here instead of returning Either
 expectResponse :: (Message -> Maybe b) -> Word -> ButtplugM (Either UnexpectedResponse b)
 expectResponse f msgId = do
   -- `pending` maps pending response message ids to callbacks that should be performed 
@@ -139,28 +151,6 @@ instance MonadBaseControl IO ButtplugM where
   type StM ButtplugM a = a
   liftBaseWith f = ButtplugM $ liftBaseWith $ \q -> f (q . runButtplugM)
   restoreM = ButtplugM . restoreM
-
-handshake :: Text -> Handle -> IO ServerInfo
-handshake clientName handle = do
-  Handle.sendMessage handle $ CoreMsg.MsgRequestServerInfo 1 clientName clientMessageVersion
-  resp <- Handle.receiveMessages handle
-  case resp of
-    [ CoreMsg.MsgServerInfo
-        1
-        msgServerName
-        msgMessageVersion
-        msgMaxPingTime
-      ] ->
-        pure $
-          ServerInfo
-            { serverName = msgServerName,
-              serverMsgVersion = msgMessageVersion,
-              serverMaxPingtime = msgMaxPingTime
-            }
-    msgs ->
-      throwIO . OtherConnectorError $
-        "Server sent unexpected response to handshake: " <> show msgs
-
 runButtplug :: Text -> Handle -> ButtplugM a -> IO a
 runButtplug clientName handle bp = do
   serverInfo <- handshake clientName handle
@@ -178,8 +168,30 @@ runButtplug clientName handle bp = do
   flip runReaderT env . runButtplugM $
     scoped $ \scope -> do
       _ <- fork scope $ forever handleIncomingMessages
+      requestDeviceList
       bp
-      
+  where
+    handshake :: Text -> Handle -> IO ServerInfo
+    handshake clientName handle = do
+      Handle.sendMessage handle $ CoreMsg.MsgRequestServerInfo 1 clientName clientMessageVersion
+      resp <- Handle.receiveMessages handle
+      case resp of
+        [ CoreMsg.MsgServerInfo
+            1
+            msgServerName
+            msgMessageVersion
+            msgMaxPingTime
+          ] ->
+            pure $
+              ServerInfo
+                { serverName = msgServerName,
+                  serverMsgVersion = msgMessageVersion,
+                  serverMaxPingtime = msgMaxPingTime
+                }
+        msgs ->
+          throwIO . OtherConnectorError $
+            "Server sent unexpected response to handshake: " <> show msgs
+
 
 -- `retry` until it exists
 getDevices :: ButtplugM [Device]
@@ -235,8 +247,11 @@ handleIncomingMessages = do
     updateDevices :: [Device] -> ButtplugM ()
     updateDevices devList = do
       devicesVar <- asks devices
-      _ <- liftIO . atomically $ swapTMVar devicesVar devList
-      pure ()
+      -- TODO I think this blocks indefinitely if devicesVar is empty
+      liftIO . atomically $ do
+        isEmptyTMVar devicesVar >>= \case
+          True -> putTMVar devicesVar devList
+          False -> swapTMVar devicesVar devList $> ()
 
 -- Continuation must return to ensure we put the handle back for other threads
 withHandle :: (Handle -> IO a) -> ButtplugM a
