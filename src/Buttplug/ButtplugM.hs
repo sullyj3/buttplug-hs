@@ -65,7 +65,6 @@ data BPEnv = BPEnv
     pendingResponses :: STMMap.Map Word (Message -> ButtplugM ())
   }
 
--- TODO throw exception if speed is not in correct range
 vibrate :: Device -> [Vibrate] -> ButtplugM Message
 vibrate (Device {deviceIndex}) speeds = do
   sendMessageExpectOk (MsgVibrateCmd deviceIndex speeds)
@@ -78,7 +77,6 @@ linearSingleActuator :: Device -> Word -> Double -> ButtplugM Message
 linearSingleActuator device duration position =
   linear device [LinearActuate 0 duration position]
 
--- todo implement better device API for accessing features
 vibrateSingleMotor device speed = vibrate device [Vibrate 0 speed]
 
 stopAllDevices = sendMessageExpectOk MsgStopAllDevices
@@ -94,8 +92,6 @@ instance Exception UnexpectedResponse
 -- f encodes our expectations about the response, returning Nothing if it's unexpected
 -- when we get the response, apply f to it, returning the result if it 
 -- succeeds, or throwing UnexpectedResponse if it fails
---
--- TODO we should have a timeout for the response, and throw instead of blocking indefinitely
 expectResponse :: (Message -> Maybe b) -> Word -> ButtplugM b
 expectResponse f msgId = do
   -- `pending` maps pending response message ids to callbacks that should be performed 
