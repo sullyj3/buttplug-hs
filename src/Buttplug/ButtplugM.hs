@@ -15,7 +15,10 @@ module Buttplug.ButtplugM
     sendMessages,
     sendMessage,
     startScanning,
+    vibrate,
     vibrateSingleMotor,
+    linear,
+    linearSingleActuator,
     stopAllDevices,
     UnexpectedResponse(..)
   )
@@ -45,6 +48,7 @@ import Control.Concurrent.MVar
 import Ki.Unlifted
 import Control.Concurrent (threadDelay)
 import Data.Functor (($>))
+import UnliftIO.Exception qualified as Exc
 
 data ServerInfo = ServerInfo
   { serverName :: Text,
@@ -62,11 +66,19 @@ data BPEnv = BPEnv
   }
 
 -- TODO throw exception if speed is not in correct range
-vibrate :: Device -> [Vibrate] -> ButtplugM (Either UnexpectedResponse Message)
+vibrate :: Device -> [Vibrate] -> ButtplugM Message
 vibrate (Device {deviceIndex}) speeds = do
   sendMessageExpectOk (MsgVibrateCmd deviceIndex speeds)
 
--- todo implement better device API
+linear :: Device -> [LinearActuate] -> ButtplugM Message
+linear (Device {deviceIndex}) linActuates = do
+  sendMessageExpectOk (MsgLinearCmd deviceIndex linActuates)
+
+linearSingleActuator :: Device -> Word -> Double -> ButtplugM Message
+linearSingleActuator device duration position =
+  linear device [LinearActuate 0 duration position]
+
+-- todo implement better device API for accessing features
 vibrateSingleMotor device speed = vibrate device [Vibrate 0 speed]
 
 stopAllDevices = sendMessageExpectOk MsgStopAllDevices
@@ -81,11 +93,10 @@ instance Exception UnexpectedResponse
 -- We're expecting a response from the server with a particular message id
 -- f encodes our expectations about the response, returning Nothing if it's unexpected
 -- when we get the response, apply f to it, returning the result if it 
--- succeeds, or UnexpectedResponse if it fails
+-- succeeds, or throwing UnexpectedResponse if it fails
 --
--- TODO we should just throw the UnexpectedResponse here instead of returning Either
 -- TODO we should have a timeout for the response, and throw instead of blocking indefinitely
-expectResponse :: (Message -> Maybe b) -> Word -> ButtplugM (Either UnexpectedResponse b)
+expectResponse :: (Message -> Maybe b) -> Word -> ButtplugM b
 expectResponse f msgId = do
   -- `pending` maps pending response message ids to callbacks that should be performed 
   -- on those responses. Calling the callback is performed by handleIncomingMessages
@@ -98,28 +109,30 @@ expectResponse f msgId = do
             Nothing -> Left $ UnexpectedResponse msg
   liftIO $ do
     atomically $ STMMap.insert writeOutput msgId pending
-    takeMVar output
+    takeMVar output >>= Exc.fromEither 
 
+-- throws UnexpectedResponse
 sendMessageExpectResponse ::
-  (Message -> Maybe a) -> Message -> ButtplugM (Either UnexpectedResponse a)
+  (Message -> Maybe a) -> Message -> ButtplugM a
 sendMessageExpectResponse expect msg = do
   msgId <- nextMsgId
   let coreMsg = withMsgId msgId msg
   sendCoreMessage coreMsg
   expectResponse expect msgId
 
-sendMessageExpectOk :: Message -> ButtplugM (Either UnexpectedResponse Message)
+-- throws UnexpectedResponse
+sendMessageExpectOk :: Message -> ButtplugM Message
 sendMessageExpectOk = sendMessageExpectResponse $ \msg -> case msg of
   MsgOk -> Just msg
   _ -> Nothing
 
-requestDeviceList :: ButtplugM (Either UnexpectedResponse [Device])
+requestDeviceList :: ButtplugM [Device]
 requestDeviceList = sendMessageExpectResponse
   (\case MsgDeviceList devList -> Just devList
          _ -> Nothing)
   MsgRequestDeviceList
 
-startScanning :: ButtplugM (Either UnexpectedResponse Message)
+startScanning :: ButtplugM Message
 startScanning = sendMessageExpectOk MsgStartScanning
 
 
