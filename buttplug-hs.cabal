@@ -25,6 +25,7 @@ source-repository head
 
 library
   exposed-modules:
+      Buttplug
       Buttplug.ButtplugM
       Buttplug.Message
       Buttplug.WebSockets
