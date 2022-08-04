@@ -20,7 +20,8 @@ module Buttplug.ButtplugM
     linear,
     linearSingleActuator,
     stopAllDevices,
-    UnexpectedResponse(..)
+    UnexpectedResponse(..),
+    addDeviceConnectedHandler
   )
 where
 
@@ -62,8 +63,15 @@ data BPEnv = BPEnv
     serverInfo :: ServerInfo,
     msgIdCounter :: TVar Word,
     devices :: TMVar [Device],
-    pendingResponses :: STMMap.Map Word (Message -> ButtplugM ())
+    pendingResponses :: STMMap.Map Word (Message -> ButtplugM ()),
+    deviceConnectedHandlers :: TVar [Device -> ButtplugM ()],
+    userThreads :: Scope
   }
+
+addDeviceConnectedHandler :: (Device -> ButtplugM ()) -> ButtplugM ()
+addDeviceConnectedHandler k = do
+  BPEnv { deviceConnectedHandlers } <- ask
+  liftIO . atomically $ modifyTVar' deviceConnectedHandlers (k:)
 
 vibrate :: Device -> [Vibrate] -> ButtplugM Message
 vibrate (Device {deviceIndex}) speeds = do
@@ -164,19 +172,23 @@ runButtplug clientName handle bp = do
   msgIdCounter <- newTVarIO 2
   devices <- newEmptyTMVarIO
   pendingResponses <- STMMap.newIO
-  let env =
-        BPEnv
-          clientName
-          handle
-          serverInfo
-          msgIdCounter
-          devices
-          pendingResponses
-  flip runReaderT env . runButtplugM $
-    scoped $ \scope -> do
-      _ <- fork scope $ forever handleIncomingMessages
-      requestDeviceList
-      bp
+  deviceConnectedHandlers <- newTVarIO []
+  scoped $ \userThreads -> do
+    let env =
+          BPEnv
+            clientName
+            handle
+            serverInfo
+            msgIdCounter
+            devices
+            pendingResponses
+            deviceConnectedHandlers
+            userThreads
+    flip runReaderT env . runButtplugM $
+      scoped $ \scope -> do
+        _ <- fork scope $ forever handleIncomingMessages
+        requestDeviceList
+        bp
   where
     handshake :: Text -> Handle -> IO ServerInfo
     handshake clientName handle = do
@@ -240,6 +252,10 @@ handleIncomingMessages =
       handlePendingResponse msg
       case withoutMsgId msg of
         MsgDeviceList devList -> updateDevices devList
+        MsgDeviceAdded name index messages -> 
+        -- todo: also update device list
+          let dev = Device name index messages
+          in  runDeviceAddedHandlers dev
         _ -> pure ()
 
     handlePendingResponse :: CoreMsg.Message -> ButtplugM ()
@@ -257,6 +273,11 @@ handleIncomingMessages =
         isEmptyTMVar devicesVar >>= \case
           True -> putTMVar devicesVar devList
           False -> swapTMVar devicesVar devList $> ()
+
+    runDeviceAddedHandlers dev = do
+      BPEnv { deviceConnectedHandlers, userThreads } <- ask
+      handlers <- liftIO $ readTVarIO deviceConnectedHandlers
+      traverse_ (fork userThreads . ($ dev)) handlers
 
 -- Continuation must return to ensure we put the handle back for other threads
 withHandle :: (Handle -> IO a) -> ButtplugM a
