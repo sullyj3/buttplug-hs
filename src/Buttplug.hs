@@ -13,6 +13,7 @@ import Buttplug.ButtplugM
     stopAllDevices,
     vibrate,
     vibrateSingleMotor,
-    addDeviceConnectedHandler
+    addDeviceConnectedHandler,
+    stopDevice
   )
 import Buttplug.Message (Vibrate (..))

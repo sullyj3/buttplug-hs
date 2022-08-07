@@ -8,23 +8,30 @@
 {-# LANGUAGE TypeFamilies #-}
 
 module Buttplug.ButtplugM
-  ( ButtplugM,
-    requestDeviceList,
-    getDevices,
+  ( -- basics 
+    ButtplugM,
     runButtplug,
+
+    -- low level
+    -- TODO only export these from an Internal module or something to make it 
+    -- clear they're not necessary for basic usage
     sendMessages,
     sendMessage,
+    sendMessageExpectOk,
+    addMessageReceivedHandler,
+
+    -- High level
+    requestDeviceList,
+    getDevices,
+    stopDevice,
     startScanning,
     vibrate,
     vibrateSingleMotor,
     linear,
     linearSingleActuator,
     stopAllDevices,
-    UnexpectedResponse(..),
     addDeviceConnectedHandler,
-    -- TODO only emport this from an Internal module or something to make it 
-    -- clear its not necessary for basic usage
-    addMessageReceivedHandler
+    UnexpectedResponse(..),
   )
 where
 
@@ -98,6 +105,8 @@ linearSingleActuator device duration position =
   linear device [LinearActuate 0 duration position]
 
 vibrateSingleMotor device speed = vibrate device [Vibrate 0 speed]
+
+stopDevice dev = sendMessageExpectOk $ MsgStopDeviceCmd (deviceIndex dev)
 
 stopAllDevices = sendMessageExpectOk MsgStopAllDevices
 
