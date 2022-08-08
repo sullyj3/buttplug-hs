@@ -275,11 +275,13 @@ handleIncomingMessages =
       handlePendingResponse coreMsg
       let msg = withoutMsgId coreMsg
       case msg of
-        MsgDeviceList devList -> updateDevices devList
-        MsgDeviceAdded name index messages -> 
-        -- todo: also update device list
+        MsgDeviceList devList -> do
+          updateDevices devList
+          traverse_ runUserDeviceAddedHandlers devList
+        MsgDeviceAdded name index messages -> do
+          -- todo: also update device list
           let dev = Device name index messages
-          in  runUserDeviceAddedHandlers dev
+          runUserDeviceAddedHandlers dev
         _ -> pure ()
       runUserMessageReceivedHandlers msg
 
